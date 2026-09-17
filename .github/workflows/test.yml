@@ -1,7 +1,6 @@
 name: test
-### Workflow for testing cert-manager-webhook-loopia ###
-### Tests are executed using a test-fixure supplied that build up a complete Kubernetes control plane ###
-### The repository secrets LOOPIA_USERNAME, LOOPIA_PASSWORD and LOOPIA_TEST_ZONE_NAME must be set for the tests to run ###
+### Workflow for building, vetting and testing cert-manager-webhook-loopia ###
+### The conformance suite and the live Loopia API test need real credentials and are run locally, see the readme ###
 
 # Run on push/pull request of Go-files in branch main or manually.
 on:
@@ -46,36 +45,31 @@ jobs:
       - name: Get dependencies
         run: go mod download
 
-      # Download the envtest binaries the conformance test fixture boots a control plane with.
-      - name: Get test binaries
+      # Fail if any Go file is not gofmt formatted.
+      - name: Check formatting
         run: |
-          ASSETS_DIR="$(sh ./testdata/scripts/fetch-test-binaries.sh)"
-          echo "KUBEBUILDER_ASSETS=$ASSETS_DIR" >> "$GITHUB_ENV"
-          echo "$ASSETS_DIR" >> "$GITHUB_PATH"
-
-      # Fail early, and with a useful message, if the credentials were never configured.
-      - name: Verify required secrets
-        env:
-          LOOPIA_TEST_ZONE_NAME: ${{ secrets.LOOPIA_TEST_ZONE_NAME }}
-        run: |
-          if [ -z "$LOOPIA_TEST_ZONE_NAME" ]; then
-            echo "::error::The repository secrets LOOPIA_USERNAME, LOOPIA_PASSWORD and LOOPIA_TEST_ZONE_NAME must be set to run the conformance test suite."
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not gofmt formatted:"
+            echo "$unformatted"
             exit 1
           fi
 
-      # Add real credentials to loopia-credentials.yaml.
-      - name: Apply credentials from secret
-        env:
-          LOOPIA_USERNAME: ${{ secrets.LOOPIA_USERNAME }}
-          LOOPIA_PASSWORD: ${{ secrets.LOOPIA_PASSWORD }}
-        run: |
-          sed -i -e "s/\[LOOPIA USERNAME\]/$LOOPIA_USERNAME/" testdata/loopia/loopia-credentials.yaml
-          sed -i -e "s/\[LOOPIA PASSWORD\]/$LOOPIA_PASSWORD/" testdata/loopia/loopia-credentials.yaml
+      # Static analysis.
+      - name: Vet
+        run: go vet ./...
 
-      # Run conformance tests.
+      # Type-check the conformance test, which is behind the "conformance" build tag,
+      # without running it: it needs a booted control plane and a real Loopia zone.
+      - name: Vet conformance test
+        run: go vet -tags conformance ./...
+
+      # Build the webhook.
+      - name: Build
+        run: go build ./...
+
+      # Run the tests. The conformance suite and the live Loopia API test skip
+      # themselves unless their credentials and zone are configured, so this
+      # step needs no secrets and stays green on forks and pull requests.
       - name: Run tests
-        env:
-          # Note the trailing ".", this means the LOOPIA_TEST_ZONE_NAME should not have a trailing ".".
-          TEST_ZONE_NAME: ${{ secrets.LOOPIA_TEST_ZONE_NAME }}.
-          TEST_STRICT_MODE: "false"
-        run: go test -v
+        run: go test -v ./...

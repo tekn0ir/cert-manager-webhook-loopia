@@ -1,3 +1,5 @@
+//go:build conformance
+
 package main
 
 import (
@@ -27,6 +29,14 @@ var (
 const defaultPropagationLimit = time.Minute * 60
 
 func TestRunsSuite(t *testing.T) {
+	// The conformance suite is behind the "conformance" build tag because it boots a
+	// complete Kubernetes control plane and creates records in a zone you control at
+	// Loopia. It therefore only runs when a zone is supplied, without TEST_ZONE_NAME
+	// the test skips.
+	if zone == "" {
+		t.Skip("TEST_ZONE_NAME must be set to a zone you control at Loopia to run the conformance suite, see the readme")
+	}
+
 	// The manifest path should contain a file named config.json that is a sniplet of valid configuration that should be included on the ChallengeRequest passed as part of the test cases.
 	// The test fixture also starts a complete Kubernetes control plane, which requires the envtest binaries (etcd, kube-apiserver and kubectl) to be available on the PATH or through KUBEBUILDER_ASSETS, there is a script supplied that downloads them in testdata/scripts.
 

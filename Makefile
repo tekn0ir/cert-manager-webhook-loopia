@@ -6,8 +6,15 @@ CHART_DIR := "charts/$(CHART_NAME)"
 
 OUT ?= .
 
+# Run the conformance suite, it needs the envtest binaries and a zone you control at Loopia, see the readme.
 test:
-	eval "$$(sh ./testdata/scripts/fetch-test-binaries.sh --env)" && go test -v .
+	eval "$$(sh ./testdata/scripts/fetch-test-binaries.sh --env)" && go test -tags conformance -v .
+
+# Run everything that needs no credentials, the same checks CI runs.
+check:
+	go vet ./...
+	go vet -tags conformance ./...
+	go test -v ./...
 
 build:
 	docker build -t "$(IMAGE_NAME):$(IMAGE_TAG)" .

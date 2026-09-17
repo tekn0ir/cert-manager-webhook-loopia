@@ -84,7 +84,7 @@ GitHub Container Registry packages are private by default. Either set the visibi
 
 Publishing requires the repository to allow the workflow to write packages, set *Settings -> Actions -> General -> Workflow permissions* to "Read and write permissions".
 
-The `test` job of both workflows needs the repository secrets `LOOPIA_USERNAME`, `LOOPIA_PASSWORD` and `LOOPIA_TEST_ZONE_NAME`, the API credentials of a real Loopia test zone, since the conformance suite creates and deletes TXT-records in it.
+Both workflows run without any credentials: they check formatting, run `go vet`, build the binary and run the tests. The conformance suite and the live Loopia API test create and delete TXT-records in a real Loopia zone, so they skip themselves unless their credentials and zone are supplied and are therefore [run locally](#4-conformance-testing) instead of in CI.
 
 ### 1.3. Compatibility
 
@@ -366,7 +366,7 @@ The test binaries are the `etcd`, `kube-apiserver` and `kubectl` binaries that c
 
 `cert-manager-webhook-loopia` has been tested for conformance, not only simple create/delete TXT-record but also in Strict/Extended mode where multiple simultaneus TXT-records are tested.
 
-To run the conformance suite, install the test binaries and point the test at a zone you control at Loopia:
+The conformance suite and the live Loopia API test are **not run in CI**, they need real credentials and modify a zone you control at Loopia. The conformance suite is behind the `conformance` build tag, so a plain `go test ./...` never compiles it and needs neither credentials nor the envtest binaries; `make check` runs the same credential-free formatting, vet and test checks as CI. To run the conformance suite, install the test binaries and point the test at a zone you control at Loopia:
 
 ```shell
 make test
@@ -376,7 +376,7 @@ make test
 export TEST_ZONE_NAME=example.com.
 export TEST_STRICT_MODE=false
 export TEST_PROPAGATION_LIMIT=60m
-go test -v
+go test -tags conformance -v .
 ```
 
 - **loopia_api_test.go:**\
