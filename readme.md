@@ -1,14 +1,17 @@
 # Cert-Manager ACME webhook for Loopia (cert-manager-webhook-loopia)
 
 > [!WARNING]
-> This repository is in urgent need of some TLC but lack of time and interest makes me the wrong person to handle it.
-> If you feel that you are the right person to give it some maintenence, please fork it and let me know and I'll add a reference to the new repository.  
+> This is the personal fork of [tekn0ir](https://github.com/tekn0ir) of [Identitry/cert-manager-webhook-loopia](https://github.com/Identitry/cert-manager-webhook-loopia).
+> It exists to keep the webhook working against the current Loopia API and current cert-manager and Kubernetes releases, but it is **sparsely maintained**: expect long gaps between updates and no support beyond the Loopia DNS-01 use case it was forked for.
+> Pull requests and patches are welcome, but there is no promise of a quick response.
+
+**Last updated: 2026-09-16** — modernised to Go 1.26, cert-manager v1.21.2, Kubernetes libraries v1.37 and Alpine 3.24, with image publishing moved from Docker Hub to the GitHub Container Registry.
 
 `cert-manager-webhook-loopia` is an ACME webhook for [Cert-Manager](https://cert-manager.io/) that allows for [Cert-Manager] to use `DNS-01` challenge against the [Loopia](https://loopia.com) DNS.
 
-[![test](https://github.com/Identitry/cert-manager-webhook-loopia/actions/workflows/test.yml/badge.svg)](https://github.com/Identitry/cert-manager-webhook-loopia/actions/workflows/test.yml)
+[![test](https://github.com/tekn0ir/cert-manager-webhook-loopia/actions/workflows/test.yml/badge.svg)](https://github.com/tekn0ir/cert-manager-webhook-loopia/actions/workflows/test.yml)
 
-[![release](https://github.com/Identitry/cert-manager-webhook-loopia/actions/workflows/release.yml/badge.svg)](https://github.com/Identitry/cert-manager-webhook-loopia/actions/workflows/release.yml)
+[![release](https://github.com/tekn0ir/cert-manager-webhook-loopia/actions/workflows/release.yml/badge.svg)](https://github.com/tekn0ir/cert-manager-webhook-loopia/actions/workflows/release.yml)
 
 ## Table of Contents
 
@@ -44,7 +47,7 @@ The main issuer of public certificates using the ACME-protocol is [Let´s Encryp
 
 The [ACME DNS-01 challenge](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge) is one of two diiferent challenges (the other is [HTTP-01](https://letsencrypt.org/docs/challenge-types/#http-01-challenge)) that you as a user of Let´s Encrypt certificates could use to prove you´re the owner of the domain the certificate is to be issued for. ACME DNS-01 challenge has an advantage over HTTP-01 in that it allows for issuance of wildcard certificates. ACME DNS-01 challenge requires you to be able to automatically add a DNS TXT record to your public DNS zone as a proof of ownership of the domain.
 
-The role of `cert-manager-webhook-loopia` is to act as a DNS-provider and create a DNS TXT-record in the '\_acme-challenge' sub domain of the domain a certificate should be issued for, for example: '\_acme-challenge.example.com'. The value the TXT-record should contain is supplied by the ACME issuer. When the DNS01 challenge is complete, `cert-manager-webhook-loopia` is responsible for cleaning up the TXT-records created. Currently `cert-manager-webhook-loopia` can´t delete the '\_acme-challenge' sub domain due to lack of functionality in the [Loopia-Go client](https://github.com/jonlil/loopia-go) used but TXT records are removed.
+The role of `cert-manager-webhook-loopia` is to act as a DNS-provider and create a DNS TXT-record in the '\_acme-challenge' sub domain of the domain a certificate should be issued for, for example: '\_acme-challenge.example.com'. The value the TXT-record should contain is supplied by the ACME issuer. When the DNS01 challenge is complete, `cert-manager-webhook-loopia` is responsible for cleaning up the TXT-records created. The matching TXT-record is removed first and the whole '\_acme-challenge' sub domain is deleted once the last record in it is gone. Note that a certificate covering both the apex and the wildcard of a domain solves both of its challenges in the same '\_acme-challenge' sub domain, so the sub domain only disappears after the last of the two records has been cleaned up.
 
 [Loopia](https://loopia.com) is a major hosting company based in Sweden but has subsidaries in Norway and Serbia but also offers services to companies and individuals in the rest of the world.
 
@@ -67,12 +70,28 @@ make build
 
 ### 1.2. Docker Image
 
-An image is hosted on Docker Hub:
-[identitry/cert-manager-webhook-loopia](https://hub.docker.com/repository/docker/identitry/cert-manager-webhook-loopia)
+Images are built and published to the GitHub Container Registry by the [release workflow](.github/workflows/release.yml):
+[ghcr.io/tekn0ir/cert-manager-webhook-loopia](https://github.com/tekn0ir/cert-manager-webhook-loopia/pkgs/container/cert-manager-webhook-loopia)
+
+The workflow pushes both `latest` and the tag of the last release on every push to `main` and on every tag, so these tags move. The Helm chart therefore defaults to the `latest` tag with `imagePullPolicy: Always`; pin both `image.tag` and the pull policy if you want a reproducible deployment.
+
+---
+
+**NOTE:**
+GitHub Container Registry packages are private by default. Either set the visibility of the package to public, or give the webhook's service account an `imagePullSecret` for `ghcr.io`.
+
+---
+
+Publishing requires the repository to allow the workflow to write packages, set *Settings -> Actions -> General -> Workflow permissions* to "Read and write permissions".
+
+The `test` job of both workflows needs the repository secrets `LOOPIA_USERNAME`, `LOOPIA_PASSWORD` and `LOOPIA_TEST_ZONE_NAME`, the API credentials of a real Loopia test zone, since the conformance suite creates and deletes TXT-records in it.
 
 ### 1.3. Compatibility
 
-This webhook has been tested with [cert-manager] v1.2.0 and Kubernetes v1.20.x on `amd64`.
+- Built with Go 1.26 using the `golang:1.27-alpine3.24` builder and the `alpine:3.24` runtime image.
+- Compiled and tested against [cert-manager] v1.21.2 and the Kubernetes libraries v1.37, the conformance fixture boots a control plane of that same version.
+- Container images are built for `linux/amd64`.
+- Only the Loopia DNS-01 webhook API is used, its `ChallengeRequest` contract has been unchanged since cert-manager v1.2.0, so older cert-manager releases keep working, the original repository was last tested with cert-manager v1.2.0 on Kubernetes v1.20.x.
 
 ## 2. Installation
 
@@ -84,7 +103,7 @@ The installation also require that you have registered for Loopia API credential
 
 ### 2.2. Install Cert-Manager
 
-The easiest way to install Cert-Manager is using Helm. For this Helm v3 needs to be installed already.
+The easiest way to install Cert-Manager is using Helm. For this Helm v3 or newer needs to be installed already.
 This is how to install Cert-Manager using Helm, if you wish to install using manifests or using other options you can use this [instruction](https://cert-manager.io/docs/installation/kubernetes).
 
 Add the Jetstack Helm Repository:
@@ -102,7 +121,7 @@ helm repo update
 Install Cert-Manager (with CRD´s):
 
 ```shell
-helm install cert-manager jetstack/cert-manager --namespace cert-manager --version v1.2.0 --create-namespace --set installCRDs=true
+helm install cert-manager jetstack/cert-manager --namespace cert-manager --version v1.21.2 --create-namespace --set installCRDs=true
 ```
 
 Verify Cert-Manager installation by getting the cert-manager running pods:
@@ -123,12 +142,12 @@ Note that it might take a minute or two before all pods are running.
 The `cert-manager-webhook-loopia` can be installed in multiple ways but the easiest is using helm:
 
 ```shell
-helm repo add identitry https://identitry.github.io/cert-manager-webhook-loopia
+helm repo add tekn0ir https://tekn0ir.github.io/cert-manager-webhook-loopia
 helm repo update
-helm install cert-manager-webhook-loopia identitry/cert-manager-webhook-loopia --namespace cert-manager
+helm install cert-manager-webhook-loopia tekn0ir/cert-manager-webhook-loopia --namespace cert-manager
 ```
 
-This will install a helm chart with the pre built image available in Docker Hub as identitry/cert-manager-webhook-loopia.
+This will install a helm chart with the pre built image available in the GitHub Container Registry as ghcr.io/tekn0ir/cert-manager-webhook-loopia.
 
 If you wish to uninstall `cert-manager-webhook-loopia` simply run this command:
 
@@ -291,12 +310,50 @@ kubectl delete certificate staging-cert-example-com
 
 Cert-Manager has a great page that describes how to do [troubleshooting](https://cert-manager.io/docs/faq/troubleshooting).
 
+When a DNS-01 challenge fails with an error like:
+
+```text
+Failed to create TXT record for '_acme-challenge.example.com': Calling parameters do not match signature
+```
+
+the [Loopia API] rejected the arguments of the request. Loopia expects the signature `(username, password, domain, subdomain, ...)`, so the webhook needs [Loopia-Go client](https://github.com/jonlil/loopia-go) revision `v0.0.0-20220617090554-b07b4c905b28` or later. Older revisions send an additional customer number argument, which makes every Loopia call fail with `Fault 623`.
+
+Since version 1.2 every error the solver returns names the Loopia API call that failed, the '\_acme-challenge' sub domain and zone it was made for and the domain the certificate is issued for, for example:
+
+```text
+Loopia API call addZoneRecord for the TXT record in "_acme-challenge.example.com" (zone "example.com", ACME challenge for "*.example.com") failed: Fault(623): Calling parameters do not match signature
+```
+
+cert-manager copies that message verbatim into `Challenge.Status.Reason`, which is surfaced in the `PresentError` event, in `Order.Status.Reason` and in the status of the `Certificate`, so this is enough to identify the failing call:
+
+```shell
+kubectl get challenges --all-namespaces
+kubectl describe challenge --namespace <namespace> <challenge-name>
+kubectl describe order --namespace <namespace> <order-name>
+kubectl describe certificate --namespace <namespace> <certificate-name>
+```
+
+The fault itself originates from the Loopia API, if the code is not self explanatory it can be looked up in the [Loopia API documentation](https://www.loopia.com/api). Two things worth checking are whether the API user still has the [permissions listed above](#31-loopia-api-credential-secret) and whether the credentials in the `loopia-credentials` Secret are still valid. The webhook pod logs show the same errors and are still useful for anything the solver cannot know about:
+
+```shell
+kubectl logs --namespace cert-manager deployment/cert-manager-webhook-loopia --follow
+```
+
+The record is written to the zone as soon as `Present` returns, but that is not the same as the record being resolvable. Loopia's nameservers can lag well behind the API: a TXT-record was measured to become visible on `ns1.loopia.se` and `ns2.loopia.se` between 20 and 45 minutes after `addZoneRecord` returned `OK`, while other record types were served within a couple of minutes. cert-manager waits for the record to propagate before it asks the ACME issuer to validate the challenge, so a slow publication shows up as a `Present` that succeeds and a challenge that still fails with a validation error. Check what the public DNS actually answers before assuming the webhook is at fault:
+
+```shell
+dig +short TXT _acme-challenge.example.com
+dig +short @ns1.loopia.se TXT _acme-challenge.example.com
+```
+
 ## 4. Conformance Testing
 
 The testing of a cert-manager weebhook is a bit special and not a typical unit or integration test, instead there´s a test-fixure supplied that build up a complete Kubernetes control plane where testing is performed. This not only requires you to download a set of test binaries but also prepare some files for testing.
 
+The test binaries are the `etcd`, `kube-apiserver` and `kubectl` binaries that controller-runtime's [envtest](https://book.kubebuilder.io/reference/envtest) boots a control plane with, they are downloaded with [setup-envtest](https://sigs.k8s.io/controller-runtime/tools/setup-envtest) in the version matching the `k8s.io/client-go` dependency in `go.mod`.
+
 - **testdata/scripts/fetch-test-binaries.sh:**\
-  Script for downloading test binaries, this script is limited to Linux/Amd64 but other OS/architecture versions are available.
+  Script for downloading the test binaries into testdata/bin. Run it without arguments to get the path of the binaries, or with `--env` to get the `KUBEBUILDER_ASSETS` and `PATH` exports that make them available to `go test`.
 
 - **testdata/loopia/config.json:**\
   This is a config file that basically informs the test fixture how to find the Kubernetes secret and keys that contains the Loopia API username and password.
@@ -305,9 +362,30 @@ The testing of a cert-manager weebhook is a bit special and not a typical unit o
   A Kubernetes secret configuration that will be applied to the Kubernetes control plane during test. Real Loopia API credentials is required since the tests connects to Loopia creating a cert-manager-dns01-tests sub domain with a TXT-record.
 
 - **testdata/bin:**\
-  Folder location for the test-binaries.
+  Folder location for the test-binaries, it is not checked in.
 
 `cert-manager-webhook-loopia` has been tested for conformance, not only simple create/delete TXT-record but also in Strict/Extended mode where multiple simultaneus TXT-records are tested.
+
+To run the conformance suite, install the test binaries and point the test at a zone you control at Loopia:
+
+```shell
+make test
+```
+
+```shell
+export TEST_ZONE_NAME=example.com.
+export TEST_STRICT_MODE=false
+export TEST_PROPAGATION_LIMIT=60m
+go test -v
+```
+
+- **loopia_api_test.go:**\
+  A separate live test of the client path used by the solver, it creates the two TXT-records a wildcard challenge needs in one sub domain, looks them up and removes them again. It is skipped unless `LOOPIA_USERNAME`, `LOOPIA_PASSWORD` and `LOOPIA_TEST_ZONE` are set:
+
+```shell
+LOOPIA_USERNAME=... LOOPIA_PASSWORD=... LOOPIA_TEST_ZONE=example.com \
+  go test -run TestLoopiaAPIAuthenticationSignature -v .
+```
 
 [ACME DNS-01 challenge]: https://letsencrypt.org/docs/challenge-types/#dns-01-challenge
 [ACME documentation]: https://cert-manager.io/docs/configuration/acme
@@ -316,7 +394,7 @@ The testing of a cert-manager weebhook is a bit special and not a typical unit o
 [Let´s Encrypt]: https://letsencrypt.org
 [Loopia]: https://loopia.com/
 [Loopia Customer Zone]: https://www.loopia.com/login
-[Loopia API]: https://doc.livedns.loopia.com
+[Loopia API]: https://www.loopia.com/api
 [Helm]: https://helm.sh
-[image tags]: https://hub.docker.com/repository/docker/identitry/cert-manager-webhook-loopia
+[image tags]: https://github.com/tekn0ir/cert-manager-webhook-loopia/pkgs/container/cert-manager-webhook-loopia
 [Kubernetes]: https://kubernetes.io

@@ -19,3 +19,7 @@
 ### Helm ###
 # Chart dependencies
 **/charts/*.tgz
+
+### Test binaries ###
+# Downloaded by testdata/scripts/fetch-test-binaries.sh
+/testdata/bin/

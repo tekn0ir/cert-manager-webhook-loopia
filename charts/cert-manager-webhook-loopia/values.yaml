@@ -13,9 +13,13 @@ certManager:
   serviceAccountName: cert-manager
 
 image:
-  repository: identitry/cert-manager-webhook-loopia
-  tag: 1.1
-  pullPolicy: IfNotPresent
+  # Images are published to the GitHub Container Registry by the release workflow,
+  # the package has to be public for the cluster to be able to pull it.
+  repository: ghcr.io/tekn0ir/cert-manager-webhook-loopia
+  # The release workflow pushes both 'latest' and the tag of the last release, so a
+  # fixed tag can be used instead, remember to change the pull policy along with it.
+  tag: latest
+  pullPolicy: Always
 
 nameOverride: ""
 fullnameOverride: ""

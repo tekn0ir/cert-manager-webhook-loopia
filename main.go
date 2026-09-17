@@ -3,19 +3,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	loopia "github.com/jonlil/loopia-go"
-	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
-	"github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
-	"github.com/jetstack/cert-manager/pkg/acme/webhook/cmd"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -38,10 +40,13 @@ func main() {
 }
 
 // loopiaDNSProviderSolver implements the provider-specific logic needed to 'present' an ACME challenge TXT record for your own DNS provider.
-// To do so, it must implement the `github.com/jetstack/cert-manager/pkg/acme/webhook.Solver` interface.
+// To do so, it must implement the `github.com/cert-manager/cert-manager/pkg/acme/webhook.Solver` interface.
 type loopiaDNSProviderSolver struct {
 	client *kubernetes.Clientset
 }
+
+// Fails to compile if the solver no longer satisfies the cert-manager webhook contract, which is the most common breakage when bumping cert-manager.
+var _ webhook.Solver = (*loopiaDNSProviderSolver)(nil)
 
 // Type holding credential.
 type credential struct {
@@ -73,33 +78,38 @@ func (c *loopiaDNSProviderSolver) Name() string {
 func (c *loopiaDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	klog.V(2).Infof("Call function Present: namespace=%s, zone=%s, fqdn=%s", ch.ResourceNamespace, ch.ResolvedZone, ch.ResolvedFQDN)
 
+	// Split and format domain and sub domain values.
+	subdomain, domain := c.getDomainAndSubdomain(ch)
+	klog.V(2).Infof("Extracted  subdomain=%s and domain=%s", subdomain, domain)
+
 	// Load config.
 	cfg, err := loadConfig(ch.Config)
 	if err != nil {
-		return fmt.Errorf("unable to load config: %v", err)
+		return fmt.Errorf("unable to load the solver config while presenting the TXT record in %q (zone %q, ACME challenge for %q): %v", subdomain, domain, ch.DNSName, err)
 	}
 	klog.V(2).Infof("Decoded configuration %v", cfg)
 
 	// Get credentials for connecting to Loopia.
 	creds, err := c.getCredentials(&cfg, ch.ResourceNamespace)
 	if err != nil {
-		return fmt.Errorf("unable to get credential: %v", err)
+		return fmt.Errorf("unable to read the Loopia API credentials while presenting the TXT record in %q (zone %q, ACME challenge for %q): %v", subdomain, domain, ch.DNSName, err)
 	}
 
 	// Initialize new Loopia client.
 	loopiaClient, err := loopia.New(creds.Username, creds.Password)
 	if err != nil {
-		return fmt.Errorf("could not initialize Loopia client: %v", err)
+		return fmt.Errorf("unable to initialize the Loopia API client while presenting the TXT record in %q (zone %q, ACME challenge for %q): %v", subdomain, domain, ch.DNSName, err)
 	}
 
-	// Split and format domain and sub domain values.
-	subdomain, domain := c.getDomainAndSubdomain(ch)
-	klog.V(2).Infof("Extracted  subdomain=%s and domain=%s", subdomain, domain)
-
 	// Get loopia records for subdomain.
-	zoneRecords, err := loopiaClient.GetZoneRecords(domain, subdomain)
-	if err != nil {
-		klog.V(2).Infof("Subdomain %s is not present, needs to be created", subdomain)
+	// Loopia answers with an empty record list for a sub domain that does not
+	// exist yet, so an error here means the API call itself failed. It is kept
+	// around rather than returned immediately, so that it can be reported
+	// together with a failure of the create call below instead of being
+	// silently interpreted as 'the record is missing'.
+	zoneRecords, lookupErr := loopiaClient.GetZoneRecords(domain, subdomain)
+	if lookupErr != nil {
+		klog.V(2).Infof("Unable to list the records of subdomain %s, assuming the record needs to be created: %v", subdomain, lookupErr)
 	} else {
 		klog.V(2).Infof("Subdomain %s is already present, checking if txt-record is present.", subdomain)
 
@@ -121,18 +131,15 @@ func (c *loopiaDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	}
 
 	// Record isn't present, create it, subdomain is created automatically.
-	err = loopiaClient.AddZoneRecord(domain, subdomain, &record)
-	if err != nil {
-		return fmt.Errorf("unable to create txt-record: %v", err)
-	} else {
-
-		// Verify the record has been created by checking it's id.
-		if record.ID != 0 {
-			klog.V(2).Infof("Successfully created txt-record in %s subdomain", subdomain)
-		} else {
-			return fmt.Errorf("unexpected error: txt-record was not created: %v", err)
-		}
+	if err := loopiaClient.AddZoneRecord(domain, subdomain, &record); err != nil {
+		return loopiaError("addZoneRecord", subdomain, domain, ch.DNSName, err, lookupErr)
 	}
+
+	// Verify the record has been created by checking it's id.
+	if record.ID == 0 {
+		return loopiaError("addZoneRecord", subdomain, domain, ch.DNSName, errors.New("the API reported success but the created TXT record was not returned by the subsequent getZoneRecords call"), lookupErr)
+	}
+	klog.V(2).Infof("Successfully created txt-record in %s subdomain", subdomain)
 
 	return nil
 }
@@ -146,53 +153,69 @@ func (c *loopiaDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 func (c *loopiaDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 	klog.V(2).Infof("Call function CleanUp: namespace=%s, zone=%s, fqdn=%s", ch.ResourceNamespace, ch.ResolvedZone, ch.ResolvedFQDN)
 
+	// Split and format domain and sub domain values.
+	subdomain, domain := c.getDomainAndSubdomain(ch)
+	klog.V(2).Infof("Cleanup for subdomain=%s, domain=%s", subdomain, domain)
+
 	// Load config.
 	cfg, err := loadConfig(ch.Config)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to load the solver config while cleaning up the TXT record in %q (zone %q, ACME challenge for %q): %v", subdomain, domain, ch.DNSName, err)
 	}
 
 	// Get credentials for connecting to Loopia.
 	creds, err := c.getCredentials(&cfg, ch.ResourceNamespace)
 	if err != nil {
-		return fmt.Errorf("unable to get credential: %v", err)
+		return fmt.Errorf("unable to read the Loopia API credentials while cleaning up the TXT record in %q (zone %q, ACME challenge for %q): %v", subdomain, domain, ch.DNSName, err)
 	}
 
 	// Initialize Loopia client.
 	loopiaClient, err := loopia.New(creds.Username, creds.Password)
 	if err != nil {
-		return fmt.Errorf("could not initialize loopia client: %v", err)
+		return fmt.Errorf("unable to initialize the Loopia API client while cleaning up the TXT record in %q (zone %q, ACME challenge for %q): %v", subdomain, domain, ch.DNSName, err)
 	}
-
-	// Split and format domain and sub domain values.
-	subdomain, domain := c.getDomainAndSubdomain(ch)
-	klog.V(2).Infof("Cleanup for subdomain=%s, domain=%s", subdomain, domain)
 
 	// Get loopia records for subdomain.
 	zoneRecords, err := loopiaClient.GetZoneRecords(domain, subdomain)
 	if err != nil {
-		return fmt.Errorf("unable to get zone records: %v", err)
+		return loopiaError("getZoneRecords", subdomain, domain, ch.DNSName, err)
 	}
 
 	// Loop records to get the one to delete, if found delete it...
 	for _, zoneRecord := range zoneRecords {
 		if zoneRecord.Type == "TXT" && zoneRecord.Value == ch.Key {
-			_, err := loopiaClient.RemoveZoneRecord(domain, subdomain, zoneRecord.ID)
-			if err != nil {
-				return fmt.Errorf("unable to delete TXT record: %v", err)
+			if _, err := loopiaClient.RemoveZoneRecord(domain, subdomain, zoneRecord.ID); err != nil {
+				return loopiaError(fmt.Sprintf("removeZoneRecord for record %d", zoneRecord.ID), subdomain, domain, ch.DNSName, err)
 			}
 		}
 	}
 
 	// Clean up subdomain.
 	if len(zoneRecords) <= 1 {
-		_, err := loopiaClient.RemoveSubDomain(domain, subdomain)
-		if err != nil {
-			return fmt.Errorf("unable to remove subdomain: %v", err)
+		if _, err := loopiaClient.RemoveSubDomain(domain, subdomain); err != nil {
+			return loopiaError("removeSubdomain", subdomain, domain, ch.DNSName, err)
 		}
 	}
 
 	return nil
+}
+
+// loopiaError builds an error describing a failed Loopia API call in enough
+// detail to be understood on its own.
+//
+// cert-manager copies the error returned by Present/CleanUp verbatim into
+// `Challenge.Status.Reason`, which is surfaced through the `PresentError`
+// event, `Order.Status.Reason` and the `Certificate` status conditions. The
+// message therefore has to name the API call and the DNS record it was made
+// for without requiring access to the webhook logs.
+func loopiaError(operation, subdomain, domain, dnsName string, err error, related ...error) error {
+	message := fmt.Sprintf("Loopia API call %s for the TXT record in %q (zone %q, ACME challenge for %q) failed: %v", operation, subdomain, domain, dnsName, err)
+	for _, relatedErr := range related {
+		if relatedErr != nil {
+			message = fmt.Sprintf("%s, preceded by a failed getZoneRecords call: %v", message, relatedErr)
+		}
+	}
+	return errors.New(message)
 }
 
 // Initialize will be called when the webhook first starts.
@@ -244,24 +267,24 @@ func (c *loopiaDNSProviderSolver) getCredentials(cfg *loopiaDNSProviderConfig, n
 	klog.V(2).Infof("Trying to load secret `%s` with key `%s`", cfg.UsernameSecretKeyRef.Name, cfg.UsernameSecretKeyRef.Key)
 	usernameSecret, err := c.client.CoreV1().Secrets(namespace).Get(context.Background(), cfg.UsernameSecretKeyRef.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load secret %q: %s", namespace+"/"+cfg.UsernameSecretKeyRef.Name, err.Error())
+		return nil, fmt.Errorf("failed to load secret %q: %v", namespace+"/"+cfg.UsernameSecretKeyRef.Name, err)
 	}
 	if username, ok := usernameSecret.Data[cfg.UsernameSecretKeyRef.Key]; ok {
 		creds.Username = string(username)
 	} else {
-		return nil, fmt.Errorf("no key %q in secret %q", cfg.UsernameSecretKeyRef, namespace+"/"+cfg.UsernameSecretKeyRef.Name)
+		return nil, fmt.Errorf("no key %q in secret %q", cfg.UsernameSecretKeyRef.Key, namespace+"/"+cfg.UsernameSecretKeyRef.Name)
 	}
 
 	// Get Password.
 	klog.V(2).Infof("Trying to load secret `%s` with key `%s`", cfg.PasswordSecretKeyRef.Name, cfg.PasswordSecretKeyRef.Key)
 	passwordSecret, err := c.client.CoreV1().Secrets(namespace).Get(context.Background(), cfg.PasswordSecretKeyRef.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load secret %q: %s", namespace+"/"+cfg.PasswordSecretKeyRef.Name, err.Error())
+		return nil, fmt.Errorf("failed to load secret %q: %v", namespace+"/"+cfg.PasswordSecretKeyRef.Name, err)
 	}
 	if password, ok := passwordSecret.Data[cfg.PasswordSecretKeyRef.Key]; ok {
 		creds.Password = string(password)
 	} else {
-		return nil, fmt.Errorf("no key %q in secret %q", cfg.PasswordSecretKeyRef, namespace+"/"+cfg.PasswordSecretKeyRef.Name)
+		return nil, fmt.Errorf("no key %q in secret %q", cfg.PasswordSecretKeyRef.Key, namespace+"/"+cfg.PasswordSecretKeyRef.Name)
 	}
 
 	return &creds, nil

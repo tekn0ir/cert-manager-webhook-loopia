@@ -1,6 +1,7 @@
 name: test
 ### Workflow for testing cert-manager-webhook-loopia ###
 ### Tests are executed using a test-fixure supplied that build up a complete Kubernetes control plane ###
+### The repository secrets LOOPIA_USERNAME, LOOPIA_PASSWORD and LOOPIA_TEST_ZONE_NAME must be set for the tests to run ###
 
 # Run on push/pull request of Go-files in branch main or manually.
 on:
@@ -17,8 +18,9 @@ on:
       - "**.go"
       - "**.mod"
       - "**.sum"
-    tags-ignore:
-      - "*"
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -29,23 +31,37 @@ jobs:
       - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
       - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
 
-      # Download a specific version of the Go tool.
-      - name: Setup Go
-        uses: actions/setup-go@v2
-        with:
-          go-version: '1.16.5'
-
       # Check out code.
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
+      # Download the Go toolchain version declared in go.mod.
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
       # Get Go dependencies.
       - name: Get dependencies
         run: go mod download
 
-      # Download and unpack required test binaries.
+      # Download the envtest binaries the conformance test fixture boots a control plane with.
       - name: Get test binaries
-        run: sh ./testdata/scripts/fetch-test-binaries.sh
+        run: |
+          ASSETS_DIR="$(sh ./testdata/scripts/fetch-test-binaries.sh)"
+          echo "KUBEBUILDER_ASSETS=$ASSETS_DIR" >> "$GITHUB_ENV"
+          echo "$ASSETS_DIR" >> "$GITHUB_PATH"
+
+      # Fail early, and with a useful message, if the credentials were never configured.
+      - name: Verify required secrets
+        env:
+          LOOPIA_TEST_ZONE_NAME: ${{ secrets.LOOPIA_TEST_ZONE_NAME }}
+        run: |
+          if [ -z "$LOOPIA_TEST_ZONE_NAME" ]; then
+            echo "::error::The repository secrets LOOPIA_USERNAME, LOOPIA_PASSWORD and LOOPIA_TEST_ZONE_NAME must be set to run the conformance test suite."
+            exit 1
+          fi
 
       # Add real credentials to loopia-credentials.yaml.
       - name: Apply credentials from secret
